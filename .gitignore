@@ -1,0 +1,29 @@
+# PyInstaller
+build/
+dist/
+
+# 发布产物（体积大，用 build_release.bat 本地重新生成）
+release/*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Secrets / local config
+.env
+.env.*
+
+# IDE / OS
+.idea/
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
