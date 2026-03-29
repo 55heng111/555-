@@ -12,20 +12,89 @@ from typing import Callable, Iterator
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 
-def _apply_bundled_lama_model_env() -> None:
-    """
-    便携版 / PyInstaller EXE：若程序同目录下存在 models\\big-lama.pt，则优先使用，无需再联网下载。
-    未打包时：以当前运行的脚本/程序所在目录为基准。
-    """
+def _exe_or_script_base() -> str:
+    """打包 EXE 时为 exe 所在目录，源码运行时为入口脚本所在目录。"""
     import sys
 
     if getattr(sys, "frozen", False):
-        base = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        base = os.path.dirname(os.path.abspath(sys.argv[0]))
-    bundled = os.path.join(base, "models", "big-lama.pt")
-    if os.path.isfile(bundled) and not os.environ.get("LAMA_MODEL"):
-        os.environ["LAMA_MODEL"] = os.path.abspath(bundled)
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+
+def _hub_cached_big_lama_path() -> str | None:
+    """本机已通过 simple_lama / torch 下载过时，模型常在此路径。"""
+    try:
+        from torch.hub import get_dir
+
+        p = os.path.join(get_dir(), "checkpoints", "big-lama.pt")
+        return p if os.path.isfile(p) else None
+    except Exception:
+        return None
+
+
+def _resolve_lama_model_path() -> str:
+    """
+    解析 big-lama.pt 路径：优先便携目录 models\\，其次环境变量（仅当文件真实存在），
+    再其次 torch hub 缓存，最后联网下载。
+
+    打包版会忽略系统中残留的 LAMA_MODEL（例如指向另一台机器或已删除的路径），
+    避免仍去加载错误位置导致 errno 2。
+    """
+    from simple_lama_inpainting.utils.util import download_model
+
+    try:
+        from simple_lama_inpainting.models.model import LAMA_MODEL_URL
+    except ImportError:
+        LAMA_MODEL_URL = os.environ.get(
+            "LAMA_MODEL_URL",
+            "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt",
+        )
+
+    bundled = os.path.join(_exe_or_script_base(), "models", "big-lama.pt")
+    if os.path.isfile(bundled):
+        return bundled
+
+    env_p = os.environ.get("LAMA_MODEL")
+    if env_p:
+        if os.path.isfile(env_p):
+            return env_p
+        os.environ.pop("LAMA_MODEL", None)
+
+    cached = _hub_cached_big_lama_path()
+    if cached:
+        return cached
+
+    return download_model(LAMA_MODEL_URL)
+
+
+def _load_lama_inference_callable(device):
+    """
+    构造与 SimpleLama 等价的 (image, mask) -> PIL.Image 可调用对象。
+    通过 Python 以二进制打开模型文件再 torch.jit.load，避免 Windows 下路径含中文时
+    C++ fopen 失败（errno 2），而 os.path.exists 仍为 True 的情况。
+    """
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    from simple_lama_inpainting.utils.util import prepare_img_and_mask
+
+    model_path = _resolve_lama_model_path()
+
+    with open(model_path, "rb") as fp:
+        jit_model = torch.jit.load(fp, map_location=device)
+    jit_model.eval()
+    jit_model.to(device)
+
+    def _forward(image, mask):
+        img_t, mask_t = prepare_img_and_mask(image, mask, device)
+        with torch.inference_mode():
+            inpainted = jit_model(img_t, mask_t)
+            cur_res = inpainted[0].permute(1, 2, 0).detach().cpu().numpy()
+            cur_res = np.clip(cur_res * 255, 0, 255).astype(np.uint8)
+            return Image.fromarray(cur_res)
+
+    return _forward
 
 
 @dataclass
@@ -210,13 +279,11 @@ class LamaInpainter:
         """首次调用时加载模型；成功返回 (True, '')，失败返回 (False, 错误说明)。"""
         if self._lama is not None:
             return True, ""
-        _apply_bundled_lama_model_env()
         try:
             if self.config.force_cpu:
                 os.environ["CUDA_VISIBLE_DEVICES"] = ""
             from PIL import Image  # noqa: F401 — 尽早发现 Pillow 缺失
             import torch
-            from simple_lama_inpainting import SimpleLama
         except ImportError as e:
             return False, f"缺少依赖库：{e}\n请先安装 torch、simple-lama-inpainting 等。"
 
@@ -224,7 +291,7 @@ class LamaInpainter:
             "cuda" if torch.cuda.is_available() and not self.config.force_cpu else "cpu"
         )
         try:
-            self._lama = SimpleLama(device=self._device)
+            self._lama = _load_lama_inference_callable(self._device)
         except Exception:
             return False, traceback.format_exc()
         return True, ""

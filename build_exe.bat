@@ -26,6 +26,14 @@ pyinstaller --noconfirm --clean --windowed --name "Gemini去Logo" ^
 echo.
 if exist "dist\Gemini去Logo\Gemini去Logo.exe" (
     echo 成功：dist\Gemini去Logo\Gemini去Logo.exe
+    if not exist "dist\Gemini去Logo\models" mkdir "dist\Gemini去Logo\models"
+    set "CACHED=%USERPROFILE%\.cache\torch\hub\checkpoints\big-lama.pt"
+    if exist "%CACHED%" (
+        copy /Y "%CACHED%" "dist\Gemini去Logo\models\big-lama.pt" >nul
+        echo 已从本机缓存复制 big-lama.pt 到 dist\Gemini去Logo\models\ ，便携运行可离线。
+    ) else (
+        echo 提示：未找到本机缓存的 big-lama.pt，EXE 首次运行需联网下载模型，或运行 build_release.bat / 手动放入 models\big-lama.pt
+    )
 ) else (
     echo 若失败，请尝试在 PowerShell 中查看报错，或安装：pip install opencv-python-headless
 )
